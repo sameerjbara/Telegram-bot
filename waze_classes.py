@@ -1,60 +1,32 @@
-import logging
 import re
 import requests
 
-logger = logging.getLogger('WazeRouteCalculator.WazeRouteCalculator')
-logger.setLevel(logging.DEBUG)
-handler = logging.StreamHandler()
-logger.addHandler(handler)
-
-
-class WRCError(Exception):
+class WazeRouteCalculatorError(Exception):
     def __init__(self, message):
         self.message = message
 
     def __str__(self):
         return self.message
 
-
 class WazeRouteCalculator(object):
-    """Calculate actual route time and distance with Waze API"""
-
     WAZE_URL = "https://www.waze.com/"
     HEADERS = {
         "User-Agent": "Mozilla/5.0",
         "referer": WAZE_URL,
     }
-    VEHICLE_TYPES = ('TAXI', 'MOTORCYCLE')
     BASE_COORDS = {
-        'US': {"lat": 40.713, "lon": -74.006},
-        'EU': {"lat": 47.498, "lon": 19.040},
-        'IL': {"lat": 31.768, "lon": 35.214},
-        'AU': {"lat": -35.281, "lon": 149.128}
+        'IL': {"lat": 31.768, "lon": 35.214}
     }
-    COORD_SERVERS = {
-        'US': 'SearchServer/mozi',
-        'EU': 'row-SearchServer/mozi',
-        'IL': 'il-SearchServer/mozi',
-        'AU': 'row-SearchServer/mozi'
+    COORD_SERVERS = {       
+        'IL': 'il-SearchServer/mozi'
     }
     ROUTING_SERVERS = {
-        'US': 'RoutingManager/routingRequest',
-        'EU': 'row-RoutingManager/routingRequest',
-        'IL': 'il-RoutingManager/routingRequest',
-        'AU': 'row-RoutingManager/routingRequest'
+        'IL': 'il-RoutingManager/routingRequest'
     }
-    COORD_MATCH = re.compile(r'^([-+]?)([\d]{1,2})(((\.)(\d+)(,)))(\s*)(([-+]?)([\d]{1,3})((\.)(\d+))?)$')
 
-    def __init__(self, start_address, end_address, region='IL', avoid_toll_roads=False, log_lvl=None):
-        self.log = logging.getLogger(__name__)
-        self.log.addHandler(logging.NullHandler())
-        if log_lvl:
-            self.log.warning("log_lvl is deprecated please check example.py ")
-        self.log.info("From: %s - to: %s", start_address)
-        self.log.info("To: %s - to: %s", end_address)
+    def __init__(self, start_address, end_address, region='IL', avoid_toll_roads=False):
         region = region.upper()
-        if region == 'NA':  # North America
-            region = 'US'
+       
         self.region = region
         self.ROUTE_OPTIONS = {
             'AVOID_TRAILS': 't',
@@ -62,12 +34,8 @@ class WazeRouteCalculator(object):
         }
         self.start_coords = self.address_to_coords(start_address)
         self.end_coords = self.address_to_coords(end_address)
-        self.log.debug('Start coords: (%s, %s)', self.start_coords["lat"], self.start_coords["lon"])
-        self.log.debug('End coords: (%s, %s)', self.end_coords["lat"], self.end_coords["lon"])
 
     def address_to_coords(self, address):
-        """Convert address to coordinates"""
-
         base_coords = self.BASE_COORDS[self.region]
         get_cord = self.COORD_SERVERS[self.region]
         url_options = {
@@ -83,18 +51,11 @@ class WazeRouteCalculator(object):
             if response_json.get('city'):
                 lat = response_json['location']['lat']
                 lon = response_json['location']['lon']
-                bounds = response_json['bounds']  # sometimes the coords don't match up
-                if bounds is not None:
-                    bounds['top'], bounds['bottom'] = max(bounds['top'], bounds['bottom']), min(bounds['top'], bounds['bottom'])
-                    bounds['left'], bounds['right'] = min(bounds['left'], bounds['right']), max(bounds['left'], bounds['right'])
-                else:
-                    bounds = {}
+                bounds = response_json.get('bounds', {})
                 return {"lat": lat, "lon": lon, "bounds": bounds}
-        raise WRCError("Cannot get coords for %s" % address)
+        raise WazeRouteCalculatorError("Cannot get coords for %s" % address)
 
     def get_route(self, npaths=1, time_delta=0):
-        """Get route data from waze"""
-
         routing_server = self.ROUTING_SERVERS[self.region]
 
         url_options = {
@@ -111,10 +72,11 @@ class WazeRouteCalculator(object):
         }
         response = requests.get(self.WAZE_URL + routing_server, params=url_options, headers=self.HEADERS)
         response.encoding = 'utf-8'
-        response_json = self._check_response(response)
-        if response_json:
+        
+        if response.ok:
+            response_json = response.json()
             if 'error' in response_json:
-                raise WRCError(response_json.get("error"))
+                raise WazeRouteCalculatorError(response_json.get("error"))
             else:
                 if response_json.get("alternatives"):
                     return [alt['response'] for alt in response_json['alternatives']]
@@ -125,20 +87,9 @@ class WazeRouteCalculator(object):
                     return [response_obj]
                 return response_obj
         else:
-            raise WRCError("empty response")
-
-    @staticmethod
-    def _check_response(response):
-        """Check waze server response."""
-        if response.ok:
-            try:
-                return response.json()
-            except ValueError:
-                return None
+            raise WazeRouteCalculatorError("HTTP request failed with status code: {}".format(response.status_code))
 
     def _add_up_route(self, results, real_time=True, stop_at_bounds=False):
-        """Calculate route time and distance."""
-
         start_bounds = self.start_coords['bounds']
         end_bounds = self.end_coords['bounds']
 
@@ -169,10 +120,7 @@ class WazeRouteCalculator(object):
         return route_time, route_distance
 
     def calc_route_info(self, real_time=True, stop_at_bounds=False, time_delta=0):
-        """Calculate best route info."""
-
         route = self.get_route(1, time_delta)
         results = route['results' if 'results' in route else 'result']
         route_time, route_distance = self._add_up_route(results, real_time=real_time, stop_at_bounds=stop_at_bounds)
-        self.log.info('Time %.2f minutes, distance %.2f km.', route_time, route_distance)
         return route_time, route_distance
